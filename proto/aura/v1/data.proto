@@ -1,0 +1,42 @@
+syntax = "proto3";
+
+package aura.v1;
+
+option go_package = "gen/go/aura/v1";
+
+message Log {
+  string id = 1;
+  int64 timestamp_unix_nano = 2;
+  string service_name = 3;
+  string level = 4;
+  string message = 5;
+  map<string, string> attributes = 6;
+}
+
+message Span {
+  bytes trace_id = 1;
+  bytes span_id = 2;
+  bytes parent_span_id = 3;
+  string name = 4;
+  int64 start_time_unix_nano = 5;
+  int64 end_time_unix_nano = 6;
+  map<string, string> attributes = 7;
+}
+
+message Metric {
+  string name = 1;
+  int64 timestamp_unix_nano = 2;
+  map<string, string> attributes = 3;
+  oneof data_point {
+    Gauge gauge = 4;
+    Counter counter = 5;
+  }
+}
+
+message Gauge {
+  double value = 1;
+}
+
+message Counter {
+  int64 total = 1;
+}
