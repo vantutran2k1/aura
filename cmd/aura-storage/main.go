@@ -2,16 +2,22 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log"
+	"net"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/nats-io/nats.go"
 	pb "github.com/vantutran2k1/aura/gen/go/aura/v1"
+	storagegrpc "github.com/vantutran2k1/aura/internal/storage/grpc"
 	"github.com/vantutran2k1/aura/internal/storage/writer"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/reflection"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -21,11 +27,14 @@ const (
 	natsSubject       = "aura.processed.logs"
 	batchSize         = 1000
 	flushInterval     = 1 * time.Second
+	grpcPort          = ":50051"
 )
 
 func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	var wg sync.WaitGroup
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -69,13 +78,39 @@ func main() {
 	}
 	log.Printf("subscribed to NATS subject: %s", natsSubject)
 
+	lis, err := net.Listen("tcp", grpcPort)
+	if err != nil {
+		log.Fatalf("failed to listen: %v", err)
+	}
+
+	grpcServer := grpc.NewServer()
+	storageServer := storagegrpc.NewServer(chConn)
+	pb.RegisterStorageServiceServer(grpcServer, storageServer)
+	reflection.Register(grpcServer)
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		log.Printf("gRPC server listening on %s", grpcPort)
+		if err := grpcServer.Serve(lis); err != nil {
+			if !errors.Is(err, grpc.ErrServerStopped) {
+				log.Printf("gRPC server error: %v", err)
+			}
+		}
+		log.Println("gRPC server stopped")
+	}()
+
 	<-sigCh
 	log.Println("Shutdown signal received, draining...")
+
+	grpcServer.GracefulStop()
 
 	if err := sub.Drain(); err != nil {
 		log.Printf("error draining NATS subscription: %v", err)
 	}
 	batchWriter.Close()
+
+	wg.Wait()
 
 	log.Println("aura-storage service shut down gracefully")
 }

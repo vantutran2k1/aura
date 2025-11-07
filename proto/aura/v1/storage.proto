@@ -1,0 +1,23 @@
+syntax = "proto3";
+
+package aura.v1;
+
+import "aura/v1/data.proto";
+
+option go_package = "gen/go/aura/v1";
+
+service StorageService {
+  rpc QueryLogs(QueryLogsRequest) returns (QueryLogsResponse);
+}
+
+message QueryLogsRequest {
+  string query = 1;
+  int64 start_time_unix_nano = 2;
+  int64 end_time_unix_nano = 3;
+  uint32 limit = 4;
+  uint32 offset = 5;
+}
+
+message QueryLogsResponse {
+  repeated Log logs = 1;
+}
