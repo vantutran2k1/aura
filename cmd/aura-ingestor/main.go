@@ -13,11 +13,13 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/nats-io/nats.go"
 	aurahttp "github.com/vantutran2k1/aura/internal/ingestor/http"
+	"github.com/vantutran2k1/aura/pkg/pprof"
 )
 
 const (
 	natsAddress = "nats://localhost:4222"
 	apiPort     = "8080"
+	pprofPort   = "6060"
 )
 
 func main() {
@@ -27,6 +29,8 @@ func main() {
 	}
 	defer nc.Close()
 	log.Println("connected to NATS")
+
+	go pprof.StartServer("localhost:" + pprofPort)
 
 	apiHandler := aurahttp.NewAPIHandler(nc)
 

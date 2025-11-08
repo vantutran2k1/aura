@@ -8,6 +8,7 @@ import (
 
 	"github.com/nats-io/nats.go"
 	"github.com/vantutran2k1/aura/internal/router/parser"
+	"github.com/vantutran2k1/aura/pkg/pprof"
 )
 
 const (
@@ -15,6 +16,7 @@ const (
 	rawLogSubject = "aura.raw.logs"
 	numWorkers    = 50
 	jobQueueSize  = 10000
+	pprofPort     = "6062"
 )
 
 func main() {
@@ -24,6 +26,8 @@ func main() {
 	}
 	defer nc.Close()
 	log.Println("connected to NATS")
+
+	go pprof.StartServer("localhost:" + pprofPort)
 
 	workerPool := parser.NewWorkerPool(numWorkers, jobQueueSize, nc)
 	workerPool.Start()

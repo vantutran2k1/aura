@@ -14,6 +14,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	pb "github.com/vantutran2k1/aura/gen/go/aura/v1"
 	queryhttp "github.com/vantutran2k1/aura/internal/query/http"
+	"github.com/vantutran2k1/aura/pkg/pprof"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -22,11 +23,14 @@ const (
 	storageGRPCAddress = "localhost:50051"
 	redisAddress       = "localhost:6379"
 	apiPort            = "8081"
+	pprofPort          = "6061"
 )
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	go pprof.StartServer("localhost:" + pprofPort)
 
 	redisClient := redis.NewClient(&redis.Options{
 		Addr: redisAddress,

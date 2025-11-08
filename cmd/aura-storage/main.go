@@ -16,6 +16,7 @@ import (
 	pb "github.com/vantutran2k1/aura/gen/go/aura/v1"
 	storagegrpc "github.com/vantutran2k1/aura/internal/storage/grpc"
 	"github.com/vantutran2k1/aura/internal/storage/writer"
+	"github.com/vantutran2k1/aura/pkg/pprof"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
 	"google.golang.org/protobuf/proto"
@@ -28,6 +29,7 @@ const (
 	batchSize         = 1000
 	flushInterval     = 1 * time.Second
 	grpcPort          = ":50051"
+	pprofPort         = "6063"
 )
 
 func main() {
@@ -38,6 +40,8 @@ func main() {
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+
+	go pprof.StartServer("localhost:" + pprofPort)
 
 	chConn, err := connectClickHouse(ctx)
 	if err != nil {
