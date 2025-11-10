@@ -17,6 +17,8 @@ import (
 	storagegrpc "github.com/vantutran2k1/aura/internal/storage/grpc"
 	"github.com/vantutran2k1/aura/internal/storage/writer"
 	"github.com/vantutran2k1/aura/pkg/pprof"
+	"github.com/vantutran2k1/aura/pkg/tracing"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
 	"google.golang.org/protobuf/proto"
@@ -37,6 +39,16 @@ func main() {
 	defer cancel()
 
 	var wg sync.WaitGroup
+
+	tp, err := tracing.InitTracerProvider(ctx, "aura-storage")
+	if err != nil {
+		log.Fatalf("failed to initialize tracer: %v", err)
+	}
+	defer func() {
+		if err := tp.Shutdown(context.Background()); err != nil {
+			log.Printf("error shutting down tracer provider: %v", err)
+		}
+	}()
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -87,7 +99,7 @@ func main() {
 		log.Fatalf("failed to listen: %v", err)
 	}
 
-	grpcServer := grpc.NewServer()
+	grpcServer := grpc.NewServer(grpc.StatsHandler(otelgrpc.NewServerHandler()))
 	storageServer := storagegrpc.NewServer(chConn)
 	pb.RegisterStorageServiceServer(grpcServer, storageServer)
 	reflection.Register(grpcServer)

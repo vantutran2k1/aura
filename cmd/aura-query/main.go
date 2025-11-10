@@ -16,6 +16,9 @@ import (
 	queryhttp "github.com/vantutran2k1/aura/internal/query/http"
 	"github.com/vantutran2k1/aura/pkg/metrics"
 	"github.com/vantutran2k1/aura/pkg/pprof"
+	"github.com/vantutran2k1/aura/pkg/tracing"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -32,6 +35,16 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	tp, err := tracing.InitTracerProvider(ctx, "aura-query")
+	if err != nil {
+		log.Fatalf("failed to initialize tracer: %v", err)
+	}
+	defer func() {
+		if err := tp.Shutdown(context.Background()); err != nil {
+			log.Printf("error shutting down tracer provider: %v", err)
+		}
+	}()
+
 	go pprof.StartServer("localhost:" + pprofPort)
 
 	go metrics.StartMetricsServer("localhost:" + metricsPort)
@@ -45,7 +58,11 @@ func main() {
 	defer redisClient.Close()
 	log.Println("connected to Redis")
 
-	conn, err := grpc.NewClient(storageGRPCAddress, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient(
+		storageGRPCAddress,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithStatsHandler(otelgrpc.NewClientHandler()),
+	)
 	if err != nil {
 		log.Fatalf("failed to connect to gRPC server: %v", err)
 	}
@@ -60,6 +77,9 @@ func main() {
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Logger)
 	r.Use(middleware.RequestID)
+	r.Use(func(h http.Handler) http.Handler {
+		return otelhttp.NewHandler(h, "aura-query-http")
+	})
 
 	r.Get("/v1/logs", apiHandler.HandleLogsQuery)
 
