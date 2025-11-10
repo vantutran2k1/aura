@@ -10,6 +10,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 	pb "github.com/vantutran2k1/aura/gen/go/aura/v1"
+	"github.com/vantutran2k1/aura/pkg/metrics"
 )
 
 const (
@@ -44,6 +45,8 @@ func (h *APIHandler) HandleLogsQuery(w http.ResponseWriter, r *http.Request) {
 	cachedResult, err := h.redisClient.Get(ctx, cacheKey).Bytes()
 	if err == nil {
 		log.Println("cache hit")
+		metrics.CacheRequestsTotal.WithLabelValues("aura-query", "hit").Inc()
+
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("X-Aura-Cache", "HIT")
 		w.Write(cachedResult)
@@ -51,6 +54,7 @@ func (h *APIHandler) HandleLogsQuery(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Println("cache miss")
+	metrics.CacheRequestsTotal.WithLabelValues("aura-query", "miss").Inc()
 
 	grpcReq := &pb.QueryLogsRequest{
 		Query: query,

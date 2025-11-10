@@ -14,6 +14,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	pb "github.com/vantutran2k1/aura/gen/go/aura/v1"
 	queryhttp "github.com/vantutran2k1/aura/internal/query/http"
+	"github.com/vantutran2k1/aura/pkg/metrics"
 	"github.com/vantutran2k1/aura/pkg/pprof"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -24,6 +25,7 @@ const (
 	redisAddress       = "localhost:6379"
 	apiPort            = "8081"
 	pprofPort          = "6061"
+	metricsPort        = "9092"
 )
 
 func main() {
@@ -31,6 +33,8 @@ func main() {
 	defer stop()
 
 	go pprof.StartServer("localhost:" + pprofPort)
+
+	go metrics.StartMetricsServer("localhost:" + metricsPort)
 
 	redisClient := redis.NewClient(&redis.Options{
 		Addr: redisAddress,

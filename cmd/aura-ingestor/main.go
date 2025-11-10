@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/nats-io/nats.go"
 	aurahttp "github.com/vantutran2k1/aura/internal/ingestor/http"
+	"github.com/vantutran2k1/aura/pkg/metrics"
 	"github.com/vantutran2k1/aura/pkg/pprof"
 )
 
@@ -20,6 +22,7 @@ const (
 	natsAddress = "nats://localhost:4222"
 	apiPort     = "8080"
 	pprofPort   = "6060"
+	metricsPort = "9091"
 )
 
 func main() {
@@ -32,6 +35,8 @@ func main() {
 
 	go pprof.StartServer("localhost:" + pprofPort)
 
+	go metrics.StartMetricsServer("localhost:" + metricsPort)
+
 	apiHandler := aurahttp.NewAPIHandler(nc)
 
 	r := chi.NewRouter()
@@ -39,6 +44,7 @@ func main() {
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Logger)
 	r.Use(middleware.RequestID)
+	r.Use(metricsMiddleware)
 
 	r.Post("/v1/logs", apiHandler.HandleLogs)
 
@@ -69,4 +75,29 @@ func main() {
 	nc.Drain()
 
 	log.Printf("aura-ingestor service shut down gracefully")
+}
+
+func metricsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
+
+		start := time.Now()
+		defer func() {
+			duration := time.Since(start)
+
+			metrics.HTTPRequestDuration.WithLabelValues(
+				"aura-ingestor",
+				r.Method,
+				strconv.Itoa(ww.Status()),
+			).Observe(duration.Seconds())
+
+			metrics.HTTPRequestsTotal.WithLabelValues(
+				"aura-ingestor",
+				r.Method,
+				strconv.Itoa(ww.Status()),
+			).Inc()
+		}()
+
+		next.ServeHTTP(ww, r)
+	})
 }
