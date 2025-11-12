@@ -2,20 +2,10 @@ package main
 
 import (
 	"context"
-	"errors"
 	"log"
-	"net/http"
 	"os/signal"
-	"strconv"
 	"syscall"
 	"time"
-
-	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
-	"github.com/nats-io/nats.go"
-	aurahttp "github.com/vantutran2k1/aura/internal/ingestor/http"
-	"github.com/vantutran2k1/aura/pkg/metrics"
-	"github.com/vantutran2k1/aura/pkg/pprof"
 )
 
 const (
@@ -26,78 +16,27 @@ const (
 )
 
 func main() {
-	nc, err := nats.Connect(natsAddress)
-	if err != nil {
-		log.Fatalf("failed to connect to NATS: %v", err)
-	}
-	defer nc.Close()
-	log.Println("connected to NATS")
-
-	go pprof.StartServer("localhost:" + pprofPort)
-
-	go metrics.StartMetricsServer("localhost:" + metricsPort)
-
-	apiHandler := aurahttp.NewAPIHandler(nc)
-
-	r := chi.NewRouter()
-
-	r.Use(middleware.Recoverer)
-	r.Use(middleware.Logger)
-	r.Use(middleware.RequestID)
-	r.Use(metricsMiddleware)
-
-	r.Post("/v1/logs", apiHandler.HandleLogs)
-
-	srv := &http.Server{
-		Addr:    ":" + apiPort,
-		Handler: r,
-	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	app, err := newApp(ctx)
+	if err != nil {
+		log.Fatalf("failed to create app: %v", err)
+	}
+
 	go func() {
-		log.Printf("aura-ingestor starting on port %s", apiPort)
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatalf("server error: %v", err)
+		if err := app.run(); err != nil {
+			log.Printf("app run error: %v", err)
 		}
 	}()
 
 	<-ctx.Done()
-	log.Println("shutdown signal received...")
+	log.Println("shutdown signal received")
 
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer shutdownCancel()
+	shutdownCtx, shutdownCancle := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutdownCancle()
 
-	if err := srv.Shutdown(shutdownCtx); err != nil {
-		log.Printf("server shutdown error: %v", err)
+	if err := app.shutdown(shutdownCtx); err != nil {
+		log.Printf("app shutdown error: %v", err)
 	}
-
-	nc.Drain()
-
-	log.Printf("aura-ingestor service shut down gracefully")
-}
-
-func metricsMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
-
-		start := time.Now()
-		defer func() {
-			duration := time.Since(start)
-
-			metrics.HTTPRequestDuration.WithLabelValues(
-				"aura-ingestor",
-				r.Method,
-				strconv.Itoa(ww.Status()),
-			).Observe(duration.Seconds())
-
-			metrics.HTTPRequestsTotal.WithLabelValues(
-				"aura-ingestor",
-				r.Method,
-				strconv.Itoa(ww.Status()),
-			).Inc()
-		}()
-
-		next.ServeHTTP(ww, r)
-	})
 }

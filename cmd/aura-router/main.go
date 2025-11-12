@@ -5,10 +5,7 @@ import (
 	"log"
 	"os/signal"
 	"syscall"
-
-	"github.com/nats-io/nats.go"
-	"github.com/vantutran2k1/aura/internal/router/parser"
-	"github.com/vantutran2k1/aura/pkg/pprof"
+	"time"
 )
 
 const (
@@ -20,40 +17,38 @@ const (
 )
 
 func main() {
-	nc, err := nats.Connect(natsAddress)
-	if err != nil {
-		log.Fatalf("failed to connect to NATS: %v", err)
-	}
-	defer nc.Close()
-	log.Println("connected to NATS")
-
-	go pprof.StartServer("localhost:" + pprofPort)
-
-	workerPool := parser.NewWorkerPool(numWorkers, jobQueueSize, nc)
-	workerPool.Start()
-
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	sub, err := nc.QueueSubscribe(rawLogSubject, "aura-router-group", func(msg *nats.Msg) {
-		job := parser.Job{Msg: msg}
-		workerPool.Submit(job)
-	})
+	app, err := newApp(ctx)
 	if err != nil {
-		log.Fatalf("faield to subscribe to NATS: %v", err)
-	}
-	log.Printf("subscribed to '%s' with queue group 'aura-router-group'", rawLogSubject)
-
-	<-ctx.Done()
-
-	log.Println("shutdown signal received, draining...")
-	stop()
-
-	if err := sub.Drain(); err != nil {
-		log.Printf("error draining NATS subscription: %v", err)
+		log.Fatalf("failed to create app: %v", err)
 	}
 
-	workerPool.Stop()
+	go func() {
+		if err := app.run(ctx); err != nil {
+			log.Printf("app run error: %v", err)
+		}
+	}()
 
-	log.Println("aura-router service shut down gracefully")
+	appErrCh := make(chan error, 1)
+	go func() {
+		appErrCh <- app.run(ctx)
+	}()
+
+	select {
+	case err := <-appErrCh:
+		if err != nil {
+			log.Printf("app run error: %v", err)
+		}
+	case <-ctx.Done():
+		log.Println("shutdown signal received")
+	}
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutdownCancel()
+
+	if err := app.shutdown(shutdownCtx); err != nil {
+		log.Printf("app shutdown error: %v", err)
+	}
 }
