@@ -27,7 +27,8 @@ services:
       - "5432:5432"
     volumes:
       - timescaledb_data:/var/lib/postgresql/data
-      - ./docker/timescaledb/init.sql:/docker-entrypoint-initdb.d/init.sql
+      - ./docker/timescaledb/init.sql:/docker-entrypoint-initdb.d/01_init.sql
+      - ./docker/timescaledb/init-alerts.sql:/docker-entrypoint-initdb.d/02_init-alerts.sql
     environment:
       POSTGRES_USER: user
       POSTGRES_PASSWORD: password
