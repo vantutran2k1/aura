@@ -49,13 +49,13 @@ func (wp *WorkerPool) Start() {
 		wp.wg.Add(1)
 		go wp.worker(i)
 	}
-	log.Printf("started %d workers", wp.numWorkers)
+	log.Printf("[logs] started %d workers", wp.numWorkers)
 }
 
 func (wp *WorkerPool) Stop() {
 	close(wp.jobs)
 	wp.wg.Wait()
-	log.Println("all workers stopped")
+	log.Println("[logs] all workers stopped")
 }
 
 func (wp *WorkerPool) Submit(job Job) {
