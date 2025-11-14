@@ -2,6 +2,7 @@ package http
 
 import (
 	"encoding/json"
+	"io"
 	"log"
 	"net/http"
 	"sync"
@@ -13,10 +14,6 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-const (
-	natsSubject = "aura.raw.logs"
-)
-
 var logPool = sync.Pool{
 	New: func() interface{} {
 		return &pb.Log{}
@@ -24,24 +21,29 @@ var logPool = sync.Pool{
 }
 
 type APIHandler struct {
-	nc *nats.Conn
+	nc             *nats.Conn
+	logsSubject    string
+	metricsSubject string
 }
 
-func NewAPIHandler(nc *nats.Conn) *APIHandler {
-	return &APIHandler{nc: nc}
+func NewAPIHandler(nc *nats.Conn, logsSubject, metricsSubject string) *APIHandler {
+	return &APIHandler{
+		nc:             nc,
+		logsSubject:    logsSubject,
+		metricsSubject: metricsSubject,
+	}
 }
 
 func (h *APIHandler) HandleLogs(w http.ResponseWriter, r *http.Request) {
 	logMsg := logPool.Get().(*pb.Log)
-
 	if err := json.NewDecoder(r.Body).Decode(logMsg); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
+	defer r.Body.Close()
 
 	logMsg.Id = uuid.NewString()
 	logMsg.TimestampUnixNano = time.Now().UnixNano()
-
 	if logMsg.ServiceName == "" {
 		http.Error(w, "missing 'service_name'", http.StatusBadRequest)
 		logMsg.Reset()
@@ -56,7 +58,7 @@ func (h *APIHandler) HandleLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.nc.Publish(natsSubject, data); err != nil {
+	if err := h.nc.Publish(h.logsSubject, data); err != nil {
 		log.Printf("failed to publish to NATS: %v\n", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
@@ -64,6 +66,28 @@ func (h *APIHandler) HandleLogs(w http.ResponseWriter, r *http.Request) {
 
 	logMsg.Reset()
 	logPool.Put(logMsg)
+	w.WriteHeader(http.StatusAccepted)
+}
+
+func (h *APIHandler) HandleMetrics(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		log.Printf("error reading metrics body: %v", err)
+		http.Error(w, "Bad request", http.StatusBadRequest)
+		return
+	}
+	defer r.Body.Close()
+
+	if len(body) == 0 {
+		http.Error(w, "empty body", http.StatusBadRequest)
+		return
+	}
+
+	if err := h.nc.Publish(h.metricsSubject, body); err != nil {
+		log.Printf("failed to publish metrics to nats: %v", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
 
 	w.WriteHeader(http.StatusAccepted)
 }
