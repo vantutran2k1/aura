@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
 	pb "github.com/vantutran2k1/aura/gen/go/aura/v1"
 	storagegrpc "github.com/vantutran2k1/aura/internal/storage/grpc"
@@ -25,35 +26,54 @@ import (
 
 type config struct {
 	natsAddress       string
-	natsSubject       string
 	clickhouseAddress string
-	grpcPort          string
-	pprofPort         string
-	metricsPort       string
-	batchSize         int
-	flushInterval     time.Duration
+	postgresURL       string
+
+	logsSubject    string
+	metricsSubject string
+
+	grpcPort    string
+	pprofPort   string
+	metricsPort string
+
+	logsBatchSize     int
+	logsFlushInterval time.Duration
+
+	metricsBatchSize     int
+	metricsFlushInterval time.Duration
 }
 
 type app struct {
-	config      config
-	tp          *sdktrace.TracerProvider
-	chConn      clickhouse.Conn
-	nc          *nats.Conn
-	batchWriter *writer.BatchWriter
-	grpcServer  *grpc.Server
-	sub         *nats.Subscription
+	config             config
+	tp                 *sdktrace.TracerProvider
+	chConn             clickhouse.Conn
+	dbPool             *pgxpool.Pool
+	nc                 *nats.Conn
+	logsBatchWriter    *writer.BatchWriter
+	metricsBatchWriter *writer.MetricsBatchWriter
+	grpcServer         *grpc.Server
+	subLogs            *nats.Subscription
+	subMetrics         *nats.Subscription
 }
 
 func newApp(ctx context.Context) (*app, error) {
 	cfg := config{
 		natsAddress:       "nats://localhost:4222",
-		natsSubject:       "aura.processed.logs",
 		clickhouseAddress: "localhost:9000",
-		grpcPort:          ":50051",
-		pprofPort:         "6063",
-		metricsPort:       "9094",
-		batchSize:         1000,
-		flushInterval:     1 * time.Second,
+		postgresURL:       "postgres://user:password@localhost:5432/aura",
+
+		logsSubject:    "aura.processed.logs",
+		metricsSubject: "aura.processed.metrics",
+
+		grpcPort:    ":50051",
+		pprofPort:   "6063",
+		metricsPort: "9094",
+
+		logsBatchSize:     1000,
+		logsFlushInterval: 1 * time.Second,
+
+		metricsBatchSize:     500,
+		metricsFlushInterval: 1 * time.Second,
 	}
 
 	tp, err := tracing.InitTracerProvider(ctx, "aura-storage")
@@ -67,6 +87,15 @@ func newApp(ctx context.Context) (*app, error) {
 	}
 	log.Println("connected to clickhouse")
 
+	dbPool, err := pgxpool.New(ctx, cfg.postgresURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to postgres: %w", err)
+	}
+	if err := dbPool.Ping(ctx); err != nil {
+		return nil, fmt.Errorf("failed to ping postgres: %w", err)
+	}
+	log.Println("connected to postgresql (timescaledb)")
+
 	nc, err := nats.Connect(cfg.natsAddress)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to nats: %w", err)
@@ -75,11 +104,19 @@ func newApp(ctx context.Context) (*app, error) {
 
 	chWriter := writer.NewClickHouseWriter(chConn)
 	batchConfig := writer.BatchWriterConfig{
-		BatchSize:     cfg.batchSize,
-		FlushInterval: cfg.flushInterval,
+		BatchSize:     cfg.logsBatchSize,
+		FlushInterval: cfg.logsFlushInterval,
 	}
 	batchWriter := writer.NewBatchWriter(ctx, chWriter, batchConfig)
-	log.Println("batch writer started")
+	log.Println("[logs] batch writer started")
+
+	tsdbWriter := writer.NewTimescaleDBWriter(dbPool)
+	metricsBatchConfig := writer.MetricsBatchWriterConfig{
+		BatchSize:     cfg.metricsBatchSize,
+		FlushInterval: cfg.metricsFlushInterval,
+	}
+	metricsBatchWriter := writer.NewMetricsBatchWriter(ctx, tsdbWriter, metricsBatchConfig)
+	log.Println("[metrics] batch writer started")
 
 	grpcServer := grpc.NewServer(
 		grpc.StatsHandler(otelgrpc.NewServerHandler()),
@@ -92,12 +129,14 @@ func newApp(ctx context.Context) (*app, error) {
 	go metrics.StartMetricsServer("localhost:" + cfg.metricsPort)
 
 	return &app{
-		config:      cfg,
-		tp:          tp,
-		chConn:      chConn,
-		nc:          nc,
-		batchWriter: batchWriter,
-		grpcServer:  grpcServer,
+		config:             cfg,
+		tp:                 tp,
+		chConn:             chConn,
+		dbPool:             dbPool,
+		nc:                 nc,
+		logsBatchWriter:    batchWriter,
+		metricsBatchWriter: metricsBatchWriter,
+		grpcServer:         grpcServer,
 	}, nil
 }
 
@@ -125,28 +164,55 @@ func (a *app) run(ctx context.Context) error {
 	})
 
 	g.Go(func() error {
-		natsHandler := func(msg *nats.Msg) {
+		logsHandler := func(msg *nats.Msg) {
 			var logMsg pb.Log
 			if err := proto.Unmarshal(msg.Data, &logMsg); err != nil {
-				log.Printf("error unmarshling log message: %v\n", err)
+				log.Printf("[logs] error unmarshling: %v\n", err)
 				return
 			}
-			if err := a.batchWriter.AddLog(&logMsg); err != nil {
-				log.Printf("error adding log to batch %v\n", err)
+			if err := a.logsBatchWriter.AddLog(&logMsg); err != nil {
+				log.Printf("[logs] error adding to batch %v\n", err)
 			}
 		}
 
-		sub, err := a.nc.Subscribe(a.config.natsSubject, natsHandler)
+		sub, err := a.nc.Subscribe(a.config.logsSubject, logsHandler)
 		if err != nil {
-			return fmt.Errorf("failed to subscribe to nats: %w", err)
+			return fmt.Errorf("[logs] failed to subscribe to nats: %w", err)
 		}
-		a.sub = sub
-		log.Printf("subscribed to nats subject: %s", a.config.natsSubject)
+		a.subLogs = sub
+		log.Printf("[logs] subscribed to nats: %s", a.config.logsSubject)
 
 		<-ctx.Done()
-		log.Println("draining nats subscription...")
-		if err := a.sub.Drain(); err != nil {
-			return fmt.Errorf("nats drain error: %w", err)
+		log.Println("[logs] draining nats subscription...")
+		if err := a.subLogs.Drain(); err != nil {
+			return fmt.Errorf("[logs] nats drain error: %w", err)
+		}
+		return nil
+	})
+
+	g.Go(func() error {
+		metricsHandler := func(msg *nats.Msg) {
+			var metric pb.Metric
+			if err := proto.Unmarshal(msg.Data, &metric); err != nil {
+				log.Printf("[metrics] error unmarshaling: %v\n", err)
+				return
+			}
+			if err := a.metricsBatchWriter.AddMetric(&metric); err != nil {
+				log.Printf("[metrics] error adding to batch: %v\n", err)
+			}
+		}
+
+		sub, err := a.nc.Subscribe(a.config.metricsSubject, metricsHandler)
+		if err != nil {
+			return fmt.Errorf("[metrics] failed to subscribe to nats: %w", err)
+		}
+		a.subMetrics = sub
+		log.Printf("[metrics] subscribed to nats: %s", a.config.metricsSubject)
+
+		<-ctx.Done()
+		log.Printf("[metrics] draining nats subscription...")
+		if err := a.subMetrics.Drain(); err != nil {
+			return fmt.Errorf("nats metrics drain error: %w", err)
 		}
 		return nil
 	})
@@ -157,10 +223,12 @@ func (a *app) run(ctx context.Context) error {
 func (a *app) shutdown(ctx context.Context) error {
 	log.Println("shutting down storage service...")
 
-	a.batchWriter.Close()
+	a.logsBatchWriter.Close()
+	a.metricsBatchWriter.Close()
 
 	a.nc.Close()
 	a.chConn.Close()
+	a.dbPool.Close()
 
 	if err := a.tp.Shutdown(ctx); err != nil {
 		log.Printf("tracer shutdown error: %v", err)
