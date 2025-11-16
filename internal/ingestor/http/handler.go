@@ -24,13 +24,15 @@ type APIHandler struct {
 	nc             *nats.Conn
 	logsSubject    string
 	metricsSubject string
+	tracesSubject  string
 }
 
-func NewAPIHandler(nc *nats.Conn, logsSubject, metricsSubject string) *APIHandler {
+func NewAPIHandler(nc *nats.Conn, logsSubject, metricsSubject, tracesSubject string) *APIHandler {
 	return &APIHandler{
 		nc:             nc,
 		logsSubject:    logsSubject,
 		metricsSubject: metricsSubject,
+		tracesSubject:  tracesSubject,
 	}
 }
 
@@ -85,6 +87,29 @@ func (h *APIHandler) HandleMetrics(w http.ResponseWriter, r *http.Request) {
 
 	if err := h.nc.Publish(h.metricsSubject, body); err != nil {
 		log.Printf("failed to publish metrics to nats: %v", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusAccepted)
+}
+
+func (h *APIHandler) HandleTraces(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		log.Printf("[traces] error reading body: %v", err)
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	defer r.Body.Close()
+
+	if len(body) == 0 {
+		http.Error(w, "empty body", http.StatusBadRequest)
+		return
+	}
+
+	if err := h.nc.Publish(h.tracesSubject, body); err != nil {
+		log.Printf("[traces] failed to publish to nats: %v", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}

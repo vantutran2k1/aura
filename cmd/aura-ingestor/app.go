@@ -26,6 +26,7 @@ type config struct {
 	natsAddress        string
 	natsLogsSubject    string
 	natsMetricsSubject string
+	natsTracesSubject  string
 }
 
 type app struct {
@@ -43,6 +44,7 @@ func newApp(ctx context.Context) (*app, error) {
 		natsAddress:        "nats://localhost:4222",
 		natsLogsSubject:    "aura.raw.logs",
 		natsMetricsSubject: "aura.raw.metrics",
+		natsTracesSubject:  "aura.raw.traces",
 	}
 
 	tp, err := tracing.InitTracerProvider(ctx, "aura-ingestor")
@@ -56,7 +58,12 @@ func newApp(ctx context.Context) (*app, error) {
 	}
 	log.Println("connected to nats")
 
-	apiHandler := aurahttp.NewAPIHandler(nc, cfg.natsLogsSubject, cfg.natsMetricsSubject)
+	apiHandler := aurahttp.NewAPIHandler(
+		nc,
+		cfg.natsLogsSubject,
+		cfg.natsMetricsSubject,
+		cfg.natsTracesSubject,
+	)
 
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
@@ -68,6 +75,7 @@ func newApp(ctx context.Context) (*app, error) {
 	})
 	r.Post("/v1/logs", apiHandler.HandleLogs)
 	r.Post("/v1/metrics", apiHandler.HandleMetrics)
+	r.Post("/v1/traces", apiHandler.HandleTraces)
 
 	httpServer := &http.Server{
 		Addr:    ":" + cfg.apiPort,
