@@ -8,6 +8,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/vantutran2k1/aura/internal/router/metrics_parser"
 	"github.com/vantutran2k1/aura/internal/router/parser"
+	"github.com/vantutran2k1/aura/internal/router/traces_parser"
 	"github.com/vantutran2k1/aura/pkg/metrics"
 	"github.com/vantutran2k1/aura/pkg/pprof"
 	"github.com/vantutran2k1/aura/pkg/tracing"
@@ -30,6 +31,11 @@ type config struct {
 	metricsQueueGroup   string
 	metricsWorkers      int
 	metricsJobQueueSize int
+
+	rawTracesSubject   string
+	tracesQueueGroup   string
+	tracesWorkers      int
+	tracesJobQueueSize int
 }
 
 type app struct {
@@ -38,8 +44,10 @@ type app struct {
 	tp                *sdktrace.TracerProvider
 	logWorkerPool     *parser.WorkerPool
 	metricsWorkerPool *metrics_parser.WorkerPool
+	tracesWorkerPool  *traces_parser.WorkerPool
 	subLogs           *nats.Subscription
 	subMetrics        *nats.Subscription
+	subTraces         *nats.Subscription
 }
 
 func newApp(ctx context.Context) (*app, error) {
@@ -57,6 +65,11 @@ func newApp(ctx context.Context) (*app, error) {
 		metricsQueueGroup:   "aura-router-metrics-group",
 		metricsWorkers:      25,
 		metricsJobQueueSize: 5000,
+
+		rawTracesSubject:   "aura.raw.traces",
+		tracesQueueGroup:   "aura-router-traces-group",
+		tracesWorkers:      25,
+		tracesJobQueueSize: 5000,
 	}
 
 	tp, err := tracing.InitTracerProvider(ctx, "aura-router")
@@ -77,6 +90,9 @@ func newApp(ctx context.Context) (*app, error) {
 	metricWorkerPool := metrics_parser.NewWorkerPool(cfg.metricsWorkers, cfg.metricsJobQueueSize, nc, tracer)
 	metricWorkerPool.Start()
 
+	tracesWorkerPool := traces_parser.NewWorkerPool(cfg.tracesWorkers, cfg.tracesJobQueueSize, nc, tracer)
+	tracesWorkerPool.Start()
+
 	go pprof.StartServer("localhost:" + cfg.pprofPort)
 	go metrics.StartMetricsServer("localhost:" + cfg.metricsPort)
 
@@ -86,6 +102,7 @@ func newApp(ctx context.Context) (*app, error) {
 		tp:                tp,
 		logWorkerPool:     logWorkerPool,
 		metricsWorkerPool: metricWorkerPool,
+		tracesWorkerPool:  tracesWorkerPool,
 	}, nil
 }
 
@@ -93,7 +110,7 @@ func (a *app) run(ctx context.Context) error {
 	g, ctx := errgroup.WithContext(ctx)
 
 	g.Go(func() error {
-		log.Printf("subscriberd to '%s' with queue group '%s'", a.config.rawLogSubject, a.config.logQueueGroup)
+		log.Printf("subscribed to '%s' with queue group '%s'", a.config.rawLogSubject, a.config.logQueueGroup)
 
 		logsHandler := func(msg *nats.Msg) {
 			job := parser.Job{
@@ -142,6 +159,31 @@ func (a *app) run(ctx context.Context) error {
 		return nil
 	})
 
+	g.Go(func() error {
+		log.Printf("subscribed to '%s' with queue group '%s'", a.config.rawTracesSubject, a.config.tracesQueueGroup)
+
+		tracesHandler := func(msg *nats.Msg) {
+			job := traces_parser.Job{
+				Msg: msg,
+				Ctx: context.Background(),
+			}
+			a.tracesWorkerPool.Submit(job)
+		}
+
+		sub, err := a.nc.QueueSubscribe(a.config.rawTracesSubject, a.config.tracesQueueGroup, tracesHandler)
+		if err != nil {
+			return fmt.Errorf("failed to subscribe to traces: %w", err)
+		}
+		a.subTraces = sub
+
+		<-ctx.Done()
+		log.Println("[traces] draining nats subscription...")
+		if err := a.subTraces.Drain(); err != nil {
+			return fmt.Errorf("traces nats drain error: %w", err)
+		}
+		return nil
+	})
+
 	log.Println("aura-router is running with logs and metrics processors")
 	return g.Wait()
 }
@@ -151,6 +193,7 @@ func (a *app) shutdown(ctx context.Context) error {
 
 	a.logWorkerPool.Stop()
 	a.metricsWorkerPool.Stop()
+	a.tracesWorkerPool.Stop()
 
 	a.nc.Close()
 
