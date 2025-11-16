@@ -121,7 +121,7 @@ func newApp(ctx context.Context) (*app, error) {
 	grpcServer := grpc.NewServer(
 		grpc.StatsHandler(otelgrpc.NewServerHandler()),
 	)
-	storageServer := storagegrpc.NewServer(chConn)
+	storageServer := storagegrpc.NewServer(chConn, dbPool)
 	pb.RegisterStorageServiceServer(grpcServer, storageServer)
 	reflection.Register(grpcServer)
 

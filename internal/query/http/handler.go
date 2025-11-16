@@ -85,3 +85,35 @@ func (h *APIHandler) HandleLogsQuery(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Aura-Cache", "MISS")
 	w.Write(jsonResponse)
 }
+
+func (h *APIHandler) HandleMetricsQuery(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	query := r.URL.Query().Get("q")
+	// TODO: implement cache
+	log.Println("[metrics] cache miss")
+	metrics.CacheRequestsTotal.WithLabelValues("aura-query-metrics", "miss").Inc()
+
+	grpcReq := &pb.QueryMetricsRequest{
+		Query: query,
+		// TODO: parse time range
+		StartTimeUnixNano: time.Now().Add(-24 * time.Hour).UnixNano(),
+		EndTimeUnixNano:   time.Now().Add(1 * time.Hour).UnixNano(),
+	}
+
+	grpcRes, err := h.storageClient.QueryMetrics(ctx, grpcReq)
+	if err != nil {
+		log.Printf("[metrics] grpc client error: %v", err)
+		http.Error(w, "error querying storage", http.StatusInternalServerError)
+		return
+	}
+
+	jsonResponse, err := json.Marshal(grpcRes)
+	if err != nil {
+		http.Error(w, "error serializing response", http.StatusInternalServerError)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Aura-Cache", "MISS")
+	w.Write(jsonResponse)
+}

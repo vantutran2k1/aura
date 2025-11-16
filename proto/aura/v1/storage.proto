@@ -8,6 +8,7 @@ option go_package = "gen/go/aura/v1";
 
 service StorageService {
   rpc QueryLogs(QueryLogsRequest) returns (QueryLogsResponse);
+  rpc QueryMetrics(QueryMetricsRequest) returns (QueryMetricsResponse);
 }
 
 message QueryLogsRequest {
@@ -20,4 +21,14 @@ message QueryLogsRequest {
 
 message QueryLogsResponse {
   repeated Log logs = 1;
+}
+
+message QueryMetricsRequest {
+  string query = 1;
+  int64 start_time_unix_nano = 2;
+  int64 end_time_unix_nano = 3;
+}
+
+message QueryMetricsResponse {
+  repeated Metric metrics = 1;
 }

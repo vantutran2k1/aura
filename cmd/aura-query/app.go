@@ -79,7 +79,9 @@ func newApp(ctx context.Context) (*app, error) {
 	r.Use(func(h http.Handler) http.Handler {
 		return otelhttp.NewHandler(h, "aura-query-http")
 	})
+
 	r.Get("/v1/logs", apiHandler.HandleLogsQuery)
+	r.Get("/v1/metrics", apiHandler.HandleMetricsQuery)
 
 	httpServer := &http.Server{
 		Addr:    ":" + cfg.apiPort,
