@@ -1,0 +1,52 @@
+nats: "nats://localhost:4222"
+clickhouse: "localhost:9000"
+postgres: "postgres://user:password@localhost:5432/aura"
+redis: "localhost:6379"
+jaeger: "127.0.0.1:4317"
+
+subjects:
+  logs:
+    raw: "aura.raw.logs"
+    processed: "aura.processed.logs"
+  metrics:
+    raw: "aura.raw.metrics"
+    processed: "aura.processed.metrics"
+  traces:
+    raw: "aura.raw.traces"
+    processed: "aura.processed.traces"
+
+ingestor:
+  api: "8080"
+  pprof: "localhost:6060"
+  metrics: "localhost:9091"
+
+query:
+  api: "8081"
+  pprof: "localhost:6061"
+  metrics: "localhost:9092"
+  storage_grpc: "localhost:50051"
+
+router:
+  pprof: "localhost:6061"
+  metrics: "localhost:9093"
+  workers:
+    logs: 50
+    metrics: 25
+    traces: 25
+
+storage:
+  grpc: ":50051"
+  pprof: "localhost:6063"
+  metrics: "localhost:9094"
+  batch:
+    logs: 1000
+    metrics: 500
+    traces: 500
+    interval: "1s"
+
+alerter:
+  pprof: "localhost:6064"
+  interval: "10s"
+
+webhook:
+  api: ":9999"
