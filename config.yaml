@@ -16,12 +16,12 @@ subjects:
     processed: "aura.processed.traces"
 
 ingestor:
-  api: "8080"
+  api: ":8080"
   pprof: "localhost:6060"
   metrics: "localhost:9091"
 
 query:
-  api: "8081"
+  api: ":8081"
   pprof: "localhost:6061"
   metrics: "localhost:9092"
   storage_grpc: "localhost:50051"

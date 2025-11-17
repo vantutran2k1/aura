@@ -106,12 +106,12 @@ func newApp(ctx context.Context) (*app, error) {
 	r.Post("/v1/traces", apiHandler.HandleTraces)
 
 	httpServer := &http.Server{
-		Addr:    ":" + cfg.APIPort,
+		Addr:    cfg.APIPort,
 		Handler: r,
 	}
 
-	go pprof.StartServer("localhost:" + cfg.PprofPort)
-	go metrics.StartMetricsServer("localhost:" + cfg.MetricsPort)
+	go pprof.StartServer(cfg.PprofPort)
+	go metrics.StartMetricsServer(cfg.MetricsPort)
 
 	return &app{
 		config:     cfg,

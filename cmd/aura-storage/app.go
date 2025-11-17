@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"strings"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
+	"github.com/spf13/viper"
 	pb "github.com/vantutran2k1/aura/gen/go/aura/v1"
 	storagegrpc "github.com/vantutran2k1/aura/internal/storage/grpc"
 	"github.com/vantutran2k1/aura/internal/storage/writer"
@@ -24,31 +26,30 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-type config struct {
-	natsAddress       string
-	clickhouseAddress string
-	postgresURL       string
+type batchConfig struct {
+	Logs     int    `mapstructure:"logs"`
+	Metrics  int    `mapstructure:"metrics"`
+	Traces   int    `mapstructure:"traces"`
+	Interval string `mapstructure:"interval"`
+}
 
-	logsSubject    string
-	metricsSubject string
-	tracesSubject  string
+type Config struct {
+	GrpcPort    string      `mapstructure:"grpc"`
+	PprofPort   string      `mapstructure:"pprof"`
+	MetricsPort string      `mapstructure:"metrics"`
+	Batch       batchConfig `mapstructure:"batch"`
 
-	grpcPort    string
-	pprofPort   string
-	metricsPort string
-
-	logsBatchSize     int
-	logsFlushInterval time.Duration
-
-	metricsBatchSize     int
-	metricsFlushInterval time.Duration
-
-	tracesBatchSize     int
-	tracesFlushInterval time.Duration
+	NatsAddress       string
+	ClickhouseAddress string
+	PostgresURL       string
+	LogsSubject       string
+	MetricsSubject    string
+	TracesSubject     string
+	FlushInterval     time.Duration
 }
 
 type app struct {
-	config             config
+	config             Config
 	tp                 *sdktrace.TracerProvider
 	chConn             clickhouse.Conn
 	dbPool             *pgxpool.Pool
@@ -62,28 +63,49 @@ type app struct {
 	subTraces          *nats.Subscription
 }
 
+func loadConfig() (Config, error) {
+	v := viper.New()
+	v.SetConfigFile("config.yaml")
+	v.AddConfigPath(".")
+
+	v.SetEnvPrefix("AURA")
+	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
+	v.AutomaticEnv()
+
+	if err := v.ReadInConfig(); err != nil {
+		if _, ok := err.(viper.ConfigFileNotFoundError); ok {
+			log.Println("config.yaml not found, using defaults and env vars")
+		} else {
+			return Config{}, fmt.Errorf("failed to read config: %w", err)
+		}
+	}
+
+	var cfg Config
+	if err := v.UnmarshalKey("storage", &cfg); err != nil {
+		return Config{}, fmt.Errorf("failed to unmarshal storage config: %w", err)
+	}
+
+	cfg.NatsAddress = v.GetString("nats")
+	cfg.ClickhouseAddress = v.GetString("clickhouse")
+	cfg.PostgresURL = v.GetString("postgres")
+	cfg.LogsSubject = v.GetString("subjects.logs.processed")
+	cfg.MetricsSubject = v.GetString("subjects.metrics.processed")
+	cfg.TracesSubject = v.GetString("subjects.traces.processed")
+
+	flushInterval, err := time.ParseDuration(cfg.Batch.Interval)
+	if err != nil {
+		return Config{}, fmt.Errorf("invalid batch.interval duration: %w", err)
+	}
+	cfg.FlushInterval = flushInterval
+
+	log.Printf("configuration loaded: %+v", cfg)
+	return cfg, nil
+}
+
 func newApp(ctx context.Context) (*app, error) {
-	cfg := config{
-		natsAddress:       "nats://localhost:4222",
-		clickhouseAddress: "localhost:9000",
-		postgresURL:       "postgres://user:password@localhost:5432/aura",
-
-		logsSubject:    "aura.processed.logs",
-		metricsSubject: "aura.processed.metrics",
-		tracesSubject:  "aura.processed.traces",
-
-		grpcPort:    ":50051",
-		pprofPort:   "6063",
-		metricsPort: "9094",
-
-		logsBatchSize:     1000,
-		logsFlushInterval: 1 * time.Second,
-
-		metricsBatchSize:     500,
-		metricsFlushInterval: 1 * time.Second,
-
-		tracesBatchSize:     500,
-		tracesFlushInterval: 1 * time.Second,
+	cfg, err := loadConfig()
+	if err != nil {
+		return nil, err
 	}
 
 	tp, err := tracing.InitTracerProvider(ctx, "aura-storage")
@@ -91,13 +113,13 @@ func newApp(ctx context.Context) (*app, error) {
 		return nil, fmt.Errorf("failed to init tracer: %w", err)
 	}
 
-	chConn, err := connectClickHouse(ctx, cfg.clickhouseAddress)
+	chConn, err := connectClickHouse(ctx, cfg.ClickhouseAddress)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to clickhouse: %w", err)
 	}
 	log.Println("connected to clickhouse")
 
-	dbPool, err := pgxpool.New(ctx, cfg.postgresURL)
+	dbPool, err := pgxpool.New(ctx, cfg.PostgresURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to postgres: %w", err)
 	}
@@ -106,7 +128,7 @@ func newApp(ctx context.Context) (*app, error) {
 	}
 	log.Println("connected to postgresql (timescaledb)")
 
-	nc, err := nats.Connect(cfg.natsAddress)
+	nc, err := nats.Connect(cfg.NatsAddress)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to nats: %w", err)
 	}
@@ -114,22 +136,25 @@ func newApp(ctx context.Context) (*app, error) {
 
 	chWriter := writer.NewClickHouseWriter(chConn)
 	batchConfig := writer.BatchWriterConfig{
-		BatchSize:     cfg.logsBatchSize,
-		FlushInterval: cfg.logsFlushInterval,
+		BatchSize:     cfg.Batch.Logs,
+		FlushInterval: cfg.FlushInterval,
 	}
 	batchWriter := writer.NewBatchWriter(ctx, chWriter, batchConfig)
 	log.Println("[logs] batch writer started")
 
 	tsdbWriter := writer.NewTimescaleDBWriter(dbPool)
 	metricsBatchConfig := writer.MetricsBatchWriterConfig{
-		BatchSize:     cfg.metricsBatchSize,
-		FlushInterval: cfg.metricsFlushInterval,
+		BatchSize:     cfg.Batch.Metrics,
+		FlushInterval: cfg.FlushInterval,
 	}
 	metricsBatchWriter := writer.NewMetricsBatchWriter(ctx, tsdbWriter, metricsBatchConfig)
 	log.Println("[metrics] batch writer started")
 
 	chTraceWriter := writer.NewClickHouseTraceWriter(chConn)
-	tracesBatchConfig := writer.TracesBatchWriterConfig{BatchSize: cfg.tracesBatchSize, FlushInterval: cfg.tracesFlushInterval}
+	tracesBatchConfig := writer.TracesBatchWriterConfig{
+		BatchSize:     cfg.Batch.Traces,
+		FlushInterval: cfg.FlushInterval,
+	}
 	tracesBatchWriter := writer.NewTracesBatchWriter(ctx, chTraceWriter, tracesBatchConfig)
 	log.Println("[traces] batch writer started")
 
@@ -140,8 +165,8 @@ func newApp(ctx context.Context) (*app, error) {
 	pb.RegisterStorageServiceServer(grpcServer, storageServer)
 	reflection.Register(grpcServer)
 
-	go pprof.StartServer("localhost:" + cfg.pprofPort)
-	go metrics.StartMetricsServer("localhost:" + cfg.metricsPort)
+	go pprof.StartServer(cfg.PprofPort)
+	go metrics.StartMetricsServer(cfg.MetricsPort)
 
 	return &app{
 		config:             cfg,
@@ -160,8 +185,8 @@ func (a *app) run(ctx context.Context) error {
 	g, ctx := errgroup.WithContext(ctx)
 
 	g.Go(func() error {
-		log.Printf("grpc server listening on %s", a.config.grpcPort)
-		lis, err := net.Listen("tcp", a.config.grpcPort)
+		log.Printf("grpc server listening on %s", a.config.GrpcPort)
+		lis, err := net.Listen("tcp", a.config.GrpcPort)
 		if err != nil {
 			return fmt.Errorf("failed to listen: %w", err)
 		}
@@ -191,12 +216,12 @@ func (a *app) run(ctx context.Context) error {
 			}
 		}
 
-		sub, err := a.nc.Subscribe(a.config.logsSubject, logsHandler)
+		sub, err := a.nc.Subscribe(a.config.LogsSubject, logsHandler)
 		if err != nil {
 			return fmt.Errorf("[logs] failed to subscribe to nats: %w", err)
 		}
 		a.subLogs = sub
-		log.Printf("[logs] subscribed to nats: %s", a.config.logsSubject)
+		log.Printf("[logs] subscribed to nats: %s", a.config.LogsSubject)
 
 		<-ctx.Done()
 		log.Println("[logs] draining nats subscription...")
@@ -218,12 +243,12 @@ func (a *app) run(ctx context.Context) error {
 			}
 		}
 
-		sub, err := a.nc.Subscribe(a.config.metricsSubject, metricsHandler)
+		sub, err := a.nc.Subscribe(a.config.MetricsSubject, metricsHandler)
 		if err != nil {
 			return fmt.Errorf("[metrics] failed to subscribe to nats: %w", err)
 		}
 		a.subMetrics = sub
-		log.Printf("[metrics] subscribed to nats: %s", a.config.metricsSubject)
+		log.Printf("[metrics] subscribed to nats: %s", a.config.MetricsSubject)
 
 		<-ctx.Done()
 		log.Printf("[metrics] draining nats subscription...")
@@ -244,12 +269,12 @@ func (a *app) run(ctx context.Context) error {
 				log.Printf("[traces] error adding to batch: %v\n", err)
 			}
 		}
-		sub, err := a.nc.Subscribe(a.config.tracesSubject, tracesHandler)
+		sub, err := a.nc.Subscribe(a.config.TracesSubject, tracesHandler)
 		if err != nil {
 			return fmt.Errorf("[traces] failed to subscribe to nats: %w", err)
 		}
 		a.subTraces = sub
-		log.Printf("[traces] subscribed to nats: %s", a.config.tracesSubject)
+		log.Printf("[traces] subscribed to nats: %s", a.config.TracesSubject)
 		<-ctx.Done()
 		log.Println("[traces] draining nats subscription...")
 		if err := a.subTraces.Drain(); err != nil {

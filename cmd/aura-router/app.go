@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 
 	"github.com/nats-io/nats.go"
+	"github.com/spf13/viper"
 	"github.com/vantutran2k1/aura/internal/router/metrics_parser"
 	"github.com/vantutran2k1/aura/internal/router/parser"
 	"github.com/vantutran2k1/aura/internal/router/traces_parser"
@@ -17,29 +19,25 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-type config struct {
-	natsAddress string
-	pprofPort   string
-	metricsPort string
+type routerWorkersConfig struct {
+	Logs    int `mapstructure:"logs"`
+	Metrics int `mapstructure:"metrics"`
+	Traces  int `mapstructure:"traces"`
+}
 
-	rawLogSubject   string
-	logQueueGroup   string
-	logWorkers      int
-	logJobQueueSize int
+type Config struct {
+	PprofPort   string              `mapstructure:"pprof"`
+	MetricsPort string              `mapstructure:"metrics"`
+	Workers     routerWorkersConfig `mapstructure:"workers"`
 
-	rawMetricsSubject   string
-	metricsQueueGroup   string
-	metricsWorkers      int
-	metricsJobQueueSize int
-
-	rawTracesSubject   string
-	tracesQueueGroup   string
-	tracesWorkers      int
-	tracesJobQueueSize int
+	NatsAddress       string
+	RawLogsSubject    string
+	RawMetricsSubject string
+	RawTracesSubject  string
 }
 
 type app struct {
-	config            config
+	config            Config
 	nc                *nats.Conn
 	tp                *sdktrace.TracerProvider
 	logWorkerPool     *parser.WorkerPool
@@ -50,26 +48,45 @@ type app struct {
 	subTraces         *nats.Subscription
 }
 
+func loadConfig() (Config, error) {
+	v := viper.New()
+	v.SetConfigFile("config.yaml")
+	v.AddConfigPath(".")
+
+	v.SetEnvPrefix("AURA")
+	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
+	v.AutomaticEnv()
+
+	v.SetDefault("router.workers.logs", 50)
+	v.SetDefault("router.workers.metrics", 25)
+	v.SetDefault("router.workers.traces", 25)
+
+	if err := v.ReadInConfig(); err != nil {
+		if _, ok := err.(viper.ConfigFileNotFoundError); ok {
+			log.Println("config.yaml not found, using defaults and env vars")
+		} else {
+			return Config{}, fmt.Errorf("failed to read config: %w", err)
+		}
+	}
+
+	var cfg Config
+	if err := v.UnmarshalKey("router", &cfg); err != nil {
+		return Config{}, fmt.Errorf("failed to unmarshal router config: %w", err)
+	}
+
+	cfg.NatsAddress = v.GetString("nats")
+	cfg.RawLogsSubject = v.GetString("subjects.logs.raw")
+	cfg.RawMetricsSubject = v.GetString("subjects.metrics.raw")
+	cfg.RawTracesSubject = v.GetString("subjects.traces.raw")
+
+	log.Printf("Configuration loaded: %+v", cfg)
+	return cfg, nil
+}
+
 func newApp(ctx context.Context) (*app, error) {
-	cfg := config{
-		natsAddress: "nats://localhost:4222",
-		pprofPort:   "6062",
-		metricsPort: "9093",
-
-		rawLogSubject:   "aura.raw.logs",
-		logQueueGroup:   "aura-router-group",
-		logWorkers:      50,
-		logJobQueueSize: 10000,
-
-		rawMetricsSubject:   "aura.raw.metrics",
-		metricsQueueGroup:   "aura-router-metrics-group",
-		metricsWorkers:      25,
-		metricsJobQueueSize: 5000,
-
-		rawTracesSubject:   "aura.raw.traces",
-		tracesQueueGroup:   "aura-router-traces-group",
-		tracesWorkers:      25,
-		tracesJobQueueSize: 5000,
+	cfg, err := loadConfig()
+	if err != nil {
+		return nil, err
 	}
 
 	tp, err := tracing.InitTracerProvider(ctx, "aura-router")
@@ -78,23 +95,23 @@ func newApp(ctx context.Context) (*app, error) {
 	}
 	tracer := otel.Tracer("aura-router")
 
-	nc, err := nats.Connect(cfg.natsAddress)
+	nc, err := nats.Connect(cfg.NatsAddress)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to nats: %w", err)
 	}
 	log.Println("connected to nats")
 
-	logWorkerPool := parser.NewWorkerPool(cfg.logWorkers, cfg.logJobQueueSize, nc, tracer)
+	logWorkerPool := parser.NewWorkerPool(cfg.Workers.Logs, 10000, nc, tracer)
 	logWorkerPool.Start()
 
-	metricWorkerPool := metrics_parser.NewWorkerPool(cfg.metricsWorkers, cfg.metricsJobQueueSize, nc, tracer)
+	metricWorkerPool := metrics_parser.NewWorkerPool(cfg.Workers.Metrics, 5000, nc, tracer)
 	metricWorkerPool.Start()
 
-	tracesWorkerPool := traces_parser.NewWorkerPool(cfg.tracesWorkers, cfg.tracesJobQueueSize, nc, tracer)
+	tracesWorkerPool := traces_parser.NewWorkerPool(cfg.Workers.Traces, 5000, nc, tracer)
 	tracesWorkerPool.Start()
 
-	go pprof.StartServer("localhost:" + cfg.pprofPort)
-	go metrics.StartMetricsServer("localhost:" + cfg.metricsPort)
+	go pprof.StartServer(cfg.PprofPort)
+	go metrics.StartMetricsServer(cfg.MetricsPort)
 
 	return &app{
 		config:            cfg,
@@ -110,7 +127,7 @@ func (a *app) run(ctx context.Context) error {
 	g, ctx := errgroup.WithContext(ctx)
 
 	g.Go(func() error {
-		log.Printf("subscribed to '%s' with queue group '%s'", a.config.rawLogSubject, a.config.logQueueGroup)
+		log.Printf("subscribed to '%s'", a.config.RawLogsSubject)
 
 		logsHandler := func(msg *nats.Msg) {
 			job := parser.Job{
@@ -120,7 +137,7 @@ func (a *app) run(ctx context.Context) error {
 			a.logWorkerPool.Submit(job)
 		}
 
-		sub, err := a.nc.QueueSubscribe(a.config.rawLogSubject, a.config.logQueueGroup, logsHandler)
+		sub, err := a.nc.QueueSubscribe(a.config.RawLogsSubject, "aura-router-logs-group", logsHandler)
 		if err != nil {
 			return fmt.Errorf("failed to subscribe to logs: %w", err)
 		}
@@ -135,7 +152,7 @@ func (a *app) run(ctx context.Context) error {
 	})
 
 	g.Go(func() error {
-		log.Printf("subscribed to '%s' with queue group '%s'", a.config.rawMetricsSubject, a.config.metricsQueueGroup)
+		log.Printf("subscribed to '%s'", a.config.RawMetricsSubject)
 
 		metricsHandler := func(msg *nats.Msg) {
 			job := metrics_parser.Job{
@@ -145,7 +162,7 @@ func (a *app) run(ctx context.Context) error {
 			a.metricsWorkerPool.Submit(job)
 		}
 
-		sub, err := a.nc.QueueSubscribe(a.config.rawMetricsSubject, a.config.metricsQueueGroup, metricsHandler)
+		sub, err := a.nc.QueueSubscribe(a.config.RawMetricsSubject, "aura-router-metrics-group", metricsHandler)
 		if err != nil {
 			return fmt.Errorf("failed to subscribe to metrics: %w", err)
 		}
@@ -160,7 +177,7 @@ func (a *app) run(ctx context.Context) error {
 	})
 
 	g.Go(func() error {
-		log.Printf("subscribed to '%s' with queue group '%s'", a.config.rawTracesSubject, a.config.tracesQueueGroup)
+		log.Printf("subscribed to '%s'", a.config.RawTracesSubject)
 
 		tracesHandler := func(msg *nats.Msg) {
 			job := traces_parser.Job{
@@ -170,7 +187,7 @@ func (a *app) run(ctx context.Context) error {
 			a.tracesWorkerPool.Submit(job)
 		}
 
-		sub, err := a.nc.QueueSubscribe(a.config.rawTracesSubject, a.config.tracesQueueGroup, tracesHandler)
+		sub, err := a.nc.QueueSubscribe(a.config.RawTracesSubject, "aura-router-traces-group", tracesHandler)
 		if err != nil {
 			return fmt.Errorf("failed to subscribe to traces: %w", err)
 		}

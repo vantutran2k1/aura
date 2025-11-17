@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/redis/go-redis/v9"
+	"github.com/spf13/viper"
 	pb "github.com/vantutran2k1/aura/gen/go/aura/v1"
 	queryhttp "github.com/vantutran2k1/aura/internal/query/http"
 	"github.com/vantutran2k1/aura/pkg/metrics"
@@ -21,29 +23,54 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 )
 
-type config struct {
-	apiPort            string
-	pprofPort          string
-	metricsPort        string
-	redisAddress       string
-	storageGRPCAddress string
+type Config struct {
+	ApiPort            string `mapstructure:"api"`
+	PprofPort          string `mapstructure:"pprof"`
+	MetricsPort        string `mapstructure:"metrics"`
+	StorageGRPCAddress string `mapstructure:"storage_grpc"`
+	RedisAddress       string
 }
 
 type app struct {
-	config      config
+	config      Config
 	httpServer  *http.Server
 	redisClient *redis.Client
 	grpcConn    *grpc.ClientConn
 	tp          *sdktrace.TracerProvider
 }
 
+func loadConfig() (Config, error) {
+	v := viper.New()
+	v.SetConfigFile("config.yaml")
+	v.AddConfigPath(".")
+
+	v.SetEnvPrefix("AURA")
+	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
+	v.AutomaticEnv()
+
+	if err := v.ReadInConfig(); err != nil {
+		if _, ok := err.(viper.ConfigFileNotFoundError); ok {
+			log.Println("config.yaml not found, using defaults and env vars")
+		} else {
+			return Config{}, fmt.Errorf("failed to read config: %w", err)
+		}
+	}
+
+	var cfg Config
+	if err := v.UnmarshalKey("query", &cfg); err != nil {
+		return Config{}, fmt.Errorf("failed to unmarshal query config: %w", err)
+	}
+
+	cfg.RedisAddress = v.GetString("redis")
+
+	log.Printf("configuration loaded: %+v", cfg)
+	return cfg, nil
+}
+
 func newApp(ctx context.Context) (*app, error) {
-	cfg := config{
-		apiPort:            "8081",
-		pprofPort:          "6061",
-		metricsPort:        "9092",
-		redisAddress:       "localhost:6379",
-		storageGRPCAddress: "localhost:50051",
+	cfg, err := loadConfig()
+	if err != nil {
+		return nil, err
 	}
 
 	tp, err := tracing.InitTracerProvider(ctx, "aura-query")
@@ -52,7 +79,7 @@ func newApp(ctx context.Context) (*app, error) {
 	}
 
 	redisClient := redis.NewClient(&redis.Options{
-		Addr: cfg.redisAddress,
+		Addr: cfg.RedisAddress,
 	})
 	if err := redisClient.Ping(ctx).Err(); err != nil {
 		return nil, fmt.Errorf("failed to connect to redis: %w", err)
@@ -60,14 +87,14 @@ func newApp(ctx context.Context) (*app, error) {
 	log.Println("connected to redis")
 
 	grpcConn, err := grpc.NewClient(
-		cfg.storageGRPCAddress,
+		cfg.StorageGRPCAddress,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithStatsHandler(otelgrpc.NewClientHandler()),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to grpc server: %w", err)
 	}
-	log.Printf("connected to grpc storage service at %s", cfg.storageGRPCAddress)
+	log.Printf("connected to grpc storage service at %s", cfg.StorageGRPCAddress)
 	storageClient := pb.NewStorageServiceClient(grpcConn)
 
 	apiHandler := queryhttp.NewAPIHandler(storageClient, redisClient)
@@ -85,12 +112,12 @@ func newApp(ctx context.Context) (*app, error) {
 	r.Get("/v1/traces", apiHandler.HandleTracesQuery)
 
 	httpServer := &http.Server{
-		Addr:    ":" + cfg.apiPort,
+		Addr:    cfg.ApiPort,
 		Handler: r,
 	}
 
-	go pprof.StartServer("localhost:" + cfg.pprofPort)
-	go metrics.StartMetricsServer("localhost:" + cfg.metricsPort)
+	go pprof.StartServer(cfg.PprofPort)
+	go metrics.StartMetricsServer(cfg.MetricsPort)
 
 	return &app{
 		config:      cfg,
@@ -102,7 +129,7 @@ func newApp(ctx context.Context) (*app, error) {
 }
 
 func (a *app) run() error {
-	log.Printf("aura-query api starting on port %s", a.config.apiPort)
+	log.Printf("aura-query api starting on port %s", a.config.ApiPort)
 	if err := a.httpServer.ListenAndServe(); err != http.ErrServerClosed {
 		return fmt.Errorf("http server error: %w", err)
 	}
