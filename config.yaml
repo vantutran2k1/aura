@@ -4,6 +4,20 @@ postgres: "postgres://user:password@localhost:5432/aura"
 redis: "localhost:6379"
 jaeger: "127.0.0.1:4317"
 
+auth:
+  keys:
+    - name: "Default Write Key"
+      key: "aura-write-key-secret-123"
+      permissions: ["write"]
+
+    - name: "Default Read Key"
+      key: "aura-read-key-secret-456"
+      permissions: ["read"]
+
+    - name: "Admin Key"
+      key: "aura-admin-key-super-secret"
+      permissions: ["read", "write"]
+
 subjects:
   logs:
     raw: "aura.raw.logs"

@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/viper"
 	pb "github.com/vantutran2k1/aura/gen/go/aura/v1"
 	queryhttp "github.com/vantutran2k1/aura/internal/query/http"
+	"github.com/vantutran2k1/aura/pkg/auth"
 	"github.com/vantutran2k1/aura/pkg/metrics"
 	"github.com/vantutran2k1/aura/pkg/pprof"
 	"github.com/vantutran2k1/aura/pkg/tracing"
@@ -39,7 +40,7 @@ type app struct {
 	tp          *sdktrace.TracerProvider
 }
 
-func loadConfig() (Config, error) {
+func loadConfig() (*viper.Viper, Config, error) {
 	v := viper.New()
 	v.SetConfigFile("config.yaml")
 	v.AddConfigPath(".")
@@ -52,25 +53,30 @@ func loadConfig() (Config, error) {
 		if _, ok := err.(viper.ConfigFileNotFoundError); ok {
 			log.Println("config.yaml not found, using defaults and env vars")
 		} else {
-			return Config{}, fmt.Errorf("failed to read config: %w", err)
+			return nil, Config{}, fmt.Errorf("failed to read config: %w", err)
 		}
 	}
 
 	var cfg Config
 	if err := v.UnmarshalKey("query", &cfg); err != nil {
-		return Config{}, fmt.Errorf("failed to unmarshal query config: %w", err)
+		return nil, Config{}, fmt.Errorf("failed to unmarshal query config: %w", err)
 	}
 
 	cfg.RedisAddress = v.GetString("redis")
 
 	log.Printf("configuration loaded: %+v", cfg)
-	return cfg, nil
+	return v, cfg, nil
 }
 
 func newApp(ctx context.Context) (*app, error) {
-	cfg, err := loadConfig()
+	v, cfg, err := loadConfig()
 	if err != nil {
 		return nil, err
+	}
+
+	authenticator, err := auth.NewAuthenticator(v)
+	if err != nil {
+		return nil, fmt.Errorf("failed to init authenticator: %w", err)
 	}
 
 	tp, err := tracing.InitTracerProvider(ctx, "aura-query")
@@ -102,6 +108,7 @@ func newApp(ctx context.Context) (*app, error) {
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Logger)
+	r.Use(authenticator.RequireAuth(auth.PermissionRead))
 	r.Use(middleware.RequestID)
 	r.Use(func(h http.Handler) http.Handler {
 		return otelhttp.NewHandler(h, "aura-query-http")
