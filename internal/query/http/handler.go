@@ -117,3 +117,35 @@ func (h *APIHandler) HandleMetricsQuery(w http.ResponseWriter, r *http.Request) 
 	w.Header().Set("X-Aura-Cache", "MISS")
 	w.Write(jsonResponse)
 }
+
+func (h *APIHandler) HandleTracesQuery(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	traceID := r.URL.Query().Get("traceID")
+	if traceID == "" {
+		http.Error(w, "Missing 'traceID' query parameter", http.StatusBadRequest)
+		return
+	}
+
+	log.Printf("[traces] handling query for traceID: %s", traceID)
+
+	grpcReq := &pb.QueryTracesRequest{
+		TraceIdHex: traceID,
+	}
+
+	grpcRes, err := h.storageClient.QueryTraces(ctx, grpcReq)
+	if err != nil {
+		log.Printf("[traces] grpc client error: %v", err)
+		http.Error(w, "error querying storage", http.StatusInternalServerError)
+		return
+	}
+
+	jsonResponse, err := json.Marshal(grpcRes)
+	if err != nil {
+		http.Error(w, "error serializing response", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(jsonResponse)
+}

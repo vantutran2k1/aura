@@ -82,6 +82,7 @@ func newApp(ctx context.Context) (*app, error) {
 
 	r.Get("/v1/logs", apiHandler.HandleLogsQuery)
 	r.Get("/v1/metrics", apiHandler.HandleMetricsQuery)
+	r.Get("/v1/traces", apiHandler.HandleTracesQuery)
 
 	httpServer := &http.Server{
 		Addr:    ":" + cfg.apiPort,

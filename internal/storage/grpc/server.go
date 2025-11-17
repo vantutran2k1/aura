@@ -2,6 +2,7 @@ package grpc
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -134,4 +135,75 @@ func (s *Server) QueryMetrics(ctx context.Context, req *pb.QueryMetricsRequest) 
 	return &pb.QueryMetricsResponse{
 		Metrics: results,
 	}, nil
+}
+
+func (s *Server) QueryTraces(ctx context.Context, req *pb.QueryTracesRequest) (*pb.QueryTracesResponse, error) {
+	log.Printf("[traces] received query traces request for ID: %s", req.TraceIdHex)
+
+	traceIDBytes, err := hex.DecodeString(req.TraceIdHex)
+	if err != nil {
+		log.Printf("[traces] invalid trace ID hex: %v", err)
+		return nil, fmt.Errorf("invalid trace_id_hex: %w", err)
+	}
+	paddedTraceID := padBytes(traceIDBytes, 16)
+
+	query := `
+		SELECT timestamp, trace_id, span_id, parent_span_id, name, duration_ns, attributes
+		FROM aura.traces
+		WHERE trace_id = ?
+		ORDER BY timestamp ASC
+	`
+
+	rows, err := s.chConn.Query(ctx, query, string(paddedTraceID))
+	if err != nil {
+		log.Printf("[traces] clickhouse query error: %v", err)
+		return nil, fmt.Errorf("failed to query traces: %w", err)
+	}
+	defer rows.Close()
+
+	var results []*pb.Span
+	for rows.Next() {
+		var (
+			span     pb.Span
+			ts       time.Time
+			duration uint64
+		)
+
+		if err := rows.Scan(
+			&ts,
+			&span.TraceId,
+			&span.SpanId,
+			&span.ParentSpanId,
+			&span.Name,
+			&duration,
+			&span.Attributes,
+		); err != nil {
+			log.Printf("[traces] clickhouse scan error: %v", err)
+			return nil, fmt.Errorf("failed to scan row: %w", err)
+		}
+
+		span.StartTimeUnixNano = ts.UnixNano()
+		span.EndTimeUnixNano = ts.UnixNano() + int64(duration)
+
+		results = append(results, &span)
+	}
+
+	log.Printf("[traces] query successful, found %d spans", len(results))
+
+	return &pb.QueryTracesResponse{
+		Spans: results,
+	}, nil
+}
+
+func padBytes(b []byte, length int) []byte {
+	if len(b) == length {
+		return b
+	}
+	if len(b) > length {
+		return b[:length]
+	}
+
+	padded := make([]byte, length)
+	copy(padded, b)
+	return padded
 }

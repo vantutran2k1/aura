@@ -21,6 +21,7 @@ const _ = grpc.SupportPackageIsVersion7
 const (
 	StorageService_QueryLogs_FullMethodName    = "/aura.v1.StorageService/QueryLogs"
 	StorageService_QueryMetrics_FullMethodName = "/aura.v1.StorageService/QueryMetrics"
+	StorageService_QueryTraces_FullMethodName  = "/aura.v1.StorageService/QueryTraces"
 )
 
 // StorageServiceClient is the client API for StorageService service.
@@ -29,6 +30,7 @@ const (
 type StorageServiceClient interface {
 	QueryLogs(ctx context.Context, in *QueryLogsRequest, opts ...grpc.CallOption) (*QueryLogsResponse, error)
 	QueryMetrics(ctx context.Context, in *QueryMetricsRequest, opts ...grpc.CallOption) (*QueryMetricsResponse, error)
+	QueryTraces(ctx context.Context, in *QueryTracesRequest, opts ...grpc.CallOption) (*QueryTracesResponse, error)
 }
 
 type storageServiceClient struct {
@@ -57,12 +59,22 @@ func (c *storageServiceClient) QueryMetrics(ctx context.Context, in *QueryMetric
 	return out, nil
 }
 
+func (c *storageServiceClient) QueryTraces(ctx context.Context, in *QueryTracesRequest, opts ...grpc.CallOption) (*QueryTracesResponse, error) {
+	out := new(QueryTracesResponse)
+	err := c.cc.Invoke(ctx, StorageService_QueryTraces_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // StorageServiceServer is the server API for StorageService service.
 // All implementations must embed UnimplementedStorageServiceServer
 // for forward compatibility
 type StorageServiceServer interface {
 	QueryLogs(context.Context, *QueryLogsRequest) (*QueryLogsResponse, error)
 	QueryMetrics(context.Context, *QueryMetricsRequest) (*QueryMetricsResponse, error)
+	QueryTraces(context.Context, *QueryTracesRequest) (*QueryTracesResponse, error)
 	mustEmbedUnimplementedStorageServiceServer()
 }
 
@@ -75,6 +87,9 @@ func (UnimplementedStorageServiceServer) QueryLogs(context.Context, *QueryLogsRe
 }
 func (UnimplementedStorageServiceServer) QueryMetrics(context.Context, *QueryMetricsRequest) (*QueryMetricsResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method QueryMetrics not implemented")
+}
+func (UnimplementedStorageServiceServer) QueryTraces(context.Context, *QueryTracesRequest) (*QueryTracesResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method QueryTraces not implemented")
 }
 func (UnimplementedStorageServiceServer) mustEmbedUnimplementedStorageServiceServer() {}
 
@@ -125,6 +140,24 @@ func _StorageService_QueryMetrics_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _StorageService_QueryTraces_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(QueryTracesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).QueryTraces(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_QueryTraces_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).QueryTraces(ctx, req.(*QueryTracesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // StorageService_ServiceDesc is the grpc.ServiceDesc for StorageService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -139,6 +172,10 @@ var StorageService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "QueryMetrics",
 			Handler:    _StorageService_QueryMetrics_Handler,
+		},
+		{
+			MethodName: "QueryTraces",
+			Handler:    _StorageService_QueryTraces_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
