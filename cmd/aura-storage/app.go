@@ -31,6 +31,7 @@ type config struct {
 
 	logsSubject    string
 	metricsSubject string
+	tracesSubject  string
 
 	grpcPort    string
 	pprofPort   string
@@ -41,6 +42,9 @@ type config struct {
 
 	metricsBatchSize     int
 	metricsFlushInterval time.Duration
+
+	tracesBatchSize     int
+	tracesFlushInterval time.Duration
 }
 
 type app struct {
@@ -51,9 +55,11 @@ type app struct {
 	nc                 *nats.Conn
 	logsBatchWriter    *writer.BatchWriter
 	metricsBatchWriter *writer.MetricsBatchWriter
+	tracesBatchWriter  *writer.TracesBatchWriter
 	grpcServer         *grpc.Server
 	subLogs            *nats.Subscription
 	subMetrics         *nats.Subscription
+	subTraces          *nats.Subscription
 }
 
 func newApp(ctx context.Context) (*app, error) {
@@ -64,6 +70,7 @@ func newApp(ctx context.Context) (*app, error) {
 
 		logsSubject:    "aura.processed.logs",
 		metricsSubject: "aura.processed.metrics",
+		tracesSubject:  "aura.processed.traces",
 
 		grpcPort:    ":50051",
 		pprofPort:   "6063",
@@ -74,6 +81,9 @@ func newApp(ctx context.Context) (*app, error) {
 
 		metricsBatchSize:     500,
 		metricsFlushInterval: 1 * time.Second,
+
+		tracesBatchSize:     500,
+		tracesFlushInterval: 1 * time.Second,
 	}
 
 	tp, err := tracing.InitTracerProvider(ctx, "aura-storage")
@@ -118,6 +128,11 @@ func newApp(ctx context.Context) (*app, error) {
 	metricsBatchWriter := writer.NewMetricsBatchWriter(ctx, tsdbWriter, metricsBatchConfig)
 	log.Println("[metrics] batch writer started")
 
+	chTraceWriter := writer.NewClickHouseTraceWriter(chConn)
+	tracesBatchConfig := writer.TracesBatchWriterConfig{BatchSize: cfg.tracesBatchSize, FlushInterval: cfg.tracesFlushInterval}
+	tracesBatchWriter := writer.NewTracesBatchWriter(ctx, chTraceWriter, tracesBatchConfig)
+	log.Println("[traces] batch writer started")
+
 	grpcServer := grpc.NewServer(
 		grpc.StatsHandler(otelgrpc.NewServerHandler()),
 	)
@@ -136,6 +151,7 @@ func newApp(ctx context.Context) (*app, error) {
 		nc:                 nc,
 		logsBatchWriter:    batchWriter,
 		metricsBatchWriter: metricsBatchWriter,
+		tracesBatchWriter:  tracesBatchWriter,
 		grpcServer:         grpcServer,
 	}, nil
 }
@@ -212,7 +228,32 @@ func (a *app) run(ctx context.Context) error {
 		<-ctx.Done()
 		log.Printf("[metrics] draining nats subscription...")
 		if err := a.subMetrics.Drain(); err != nil {
-			return fmt.Errorf("nats metrics drain error: %w", err)
+			return fmt.Errorf("[metrics] nats drain error: %w", err)
+		}
+		return nil
+	})
+
+	g.Go(func() error {
+		tracesHandler := func(msg *nats.Msg) {
+			var span pb.Span
+			if err := proto.Unmarshal(msg.Data, &span); err != nil {
+				log.Printf("[traces] error unmarshaling: %v\n", err)
+				return
+			}
+			if err := a.tracesBatchWriter.AddSpan(&span); err != nil {
+				log.Printf("[traces] error adding to batch: %v\n", err)
+			}
+		}
+		sub, err := a.nc.Subscribe(a.config.tracesSubject, tracesHandler)
+		if err != nil {
+			return fmt.Errorf("[traces] failed to subscribe to nats: %w", err)
+		}
+		a.subTraces = sub
+		log.Printf("[traces] subscribed to nats: %s", a.config.tracesSubject)
+		<-ctx.Done()
+		log.Println("[traces] draining nats subscription...")
+		if err := a.subTraces.Drain(); err != nil {
+			return fmt.Errorf("[traces] nats drain error: %w", err)
 		}
 		return nil
 	})
@@ -225,6 +266,7 @@ func (a *app) shutdown(ctx context.Context) error {
 
 	a.logsBatchWriter.Close()
 	a.metricsBatchWriter.Close()
+	a.tracesBatchWriter.Close()
 
 	a.nc.Close()
 	a.chConn.Close()

@@ -53,7 +53,7 @@ type ResourceSpan struct {
 }
 
 type OTLPPayload struct {
-	ResourceSpans []ResourceSpan `json:"resourceSpan"`
+	ResourceSpans []ResourceSpan `json:"resourceSpans"`
 }
 
 type Job struct {
