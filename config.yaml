@@ -41,7 +41,7 @@ query:
   storage_grpc: "localhost:50051"
 
 router:
-  pprof: "localhost:6061"
+  pprof: "localhost:6062"
   metrics: "localhost:9093"
   workers:
     logs: 50

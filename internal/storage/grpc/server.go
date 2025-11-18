@@ -6,14 +6,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/jackc/pgx/v5/pgxpool"
 	pb "github.com/vantutran2k1/aura/gen/go/aura/v1"
+	"github.com/vantutran2k1/aura/pkg/queryparser"
 )
-
-const logQueryTemplate = "SELECT timestamp, id, service_name, level, message, attributes FROM aura.logs WHERE timestamp >= toDateTime64(%d, 9) AND timestamp <= toDateTime64(%d, 9) AND (message LIKE '%%%s%%' OR service_name LIKE '%%%s%%' OR level LIKE '%%%s%%') ORDER BY timestamp DESC LIMIT %d"
 
 type Server struct {
 	pb.UnimplementedStorageServiceServer
@@ -31,19 +31,43 @@ func NewServer(ch clickhouse.Conn, db *pgxpool.Pool) *Server {
 func (s *Server) QueryLogs(ctx context.Context, req *pb.QueryLogsRequest) (*pb.QueryLogsResponse, error) {
 	log.Printf("received query logs request: %s", req.Query)
 
-	// TODO: handle query parser properly using ANTLR
+	baseQuery := "SELECT timestamp, id, service_name, level, message, attributes FROM aura.logs"
+	var whereClause string
+	var queryArgs []any
 
-	query := fmt.Sprintf(
-		logQueryTemplate,
-		req.StartTimeUnixNano/1e9,
-		req.EndTimeUnixNano/1e9,
-		req.Query,
-		req.Query,
-		req.Query,
-		req.Limit,
-	)
+	if req.Query != "" {
+		ast, err := queryparser.Parse(req.Query)
+		if err != nil {
+			log.Printf("query parse error: %v", err)
+			return nil, fmt.Errorf("invalid query syntax: %w", err)
+		}
 
-	rows, err := s.chConn.Query(ctx, query)
+		clause, args, err := queryparser.BuildSQL(ast)
+		if err != nil {
+			log.Printf("query build error: %v", err)
+			return nil, fmt.Errorf("invalid query: %w", err)
+		}
+
+		whereClause = "WHERE " + clause
+		queryArgs = args
+	}
+
+	timeClause := "timestamp >= ? AND timestamp <= ?"
+	queryArgs = append(queryArgs, time.Unix(0, req.StartTimeUnixNano))
+	queryArgs = append(queryArgs, time.Unix(0, req.EndTimeUnixNano))
+
+	if whereClause == "" {
+		whereClause = "WHERE " + timeClause
+	} else {
+		whereClause = whereClause + " AND " + timeClause
+	}
+
+	finalQuery := fmt.Sprintf("%s %s ORDER BY timestamp DESC LIMIT %d", baseQuery, whereClause, req.Limit)
+
+	log.Printf("executing sql: %s", finalQuery)
+	log.Printf("with args: %v", queryArgs...)
+
+	rows, err := s.chConn.Query(ctx, finalQuery, queryArgs...)
 	if err != nil {
 		log.Printf("clickhouse query error: %v", err)
 		return nil, fmt.Errorf("failed to query click house: %w", err)
@@ -83,20 +107,44 @@ func (s *Server) QueryLogs(ctx context.Context, req *pb.QueryLogsRequest) (*pb.Q
 func (s *Server) QueryMetrics(ctx context.Context, req *pb.QueryMetricsRequest) (*pb.QueryMetricsResponse, error) {
 	log.Printf("[metrics] received query metrics request: %s", req.Query)
 
-	query := `
-	SELECT timestamp, name, value, attributes
-	FROM metrics
-	WHERE timestamp >= $1 AND timestamp <= $2
-	AND name LIKE $3 OR attributes::text LIKE $3
-	ORDER BY timestamp DESC
-	LIMIT 100
-	`
+	var whereClause string
+	var queryArgs []any
 
-	likeQuery := "%" + req.Query + "%"
-	startTime := time.Unix(0, req.StartTimeUnixNano)
-	endTime := time.Unix(0, req.EndTimeUnixNano)
+	if req.Query != "" {
+		ast, err := queryparser.Parse(req.Query)
+		if err != nil {
+			log.Printf("[metrics] query parse error: %v", err)
+			return nil, fmt.Errorf("invalid query syntax: %w", err)
+		}
 
-	rows, err := s.dbPool.Query(ctx, query, startTime, endTime, likeQuery)
+		baseClause, baseArgs, err := queryparser.BuildSQL(ast)
+		if err != nil {
+			return nil, fmt.Errorf("invalid query: %w", err)
+		}
+
+		n := 0
+		whereClause = "WHERE " + rebind(baseClause, &n)
+		queryArgs = baseArgs
+	}
+
+	timeClause := "timestamp >= $1 AND timestamp <= $2"
+	if whereClause != "" {
+		timeClause = "timstamp >= $3 AND timestamp <= $4"
+		queryArgs = append(queryArgs, time.Unix(0, req.StartTimeUnixNano), time.Unix(0, req.EndTimeUnixNano))
+	} else {
+		whereClause = "WHERE " + timeClause
+		queryArgs = []any{time.Unix(0, req.StartTimeUnixNano), time.Unix(0, req.EndTimeUnixNano)}
+	}
+
+	finalQuery := fmt.Sprintf(
+		"SELECT timestamp, name, value, attributes FROM metrics %s ORDER BY timestamp DESC LIMIT 100",
+		whereClause,
+	)
+
+	log.Printf("executing sql: %s", finalQuery)
+	log.Printf("with args: %v", queryArgs)
+
+	rows, err := s.dbPool.Query(ctx, finalQuery, queryArgs...)
 	if err != nil {
 		log.Printf("[metrics] timescaledb query error: %v", err)
 		return nil, fmt.Errorf("failed to query metrics: %w", err)
@@ -193,6 +241,20 @@ func (s *Server) QueryTraces(ctx context.Context, req *pb.QueryTracesRequest) (*
 	return &pb.QueryTracesResponse{
 		Spans: results,
 	}, nil
+}
+
+func rebind(query string, n *int) string {
+	var b strings.Builder
+	for _, r := range query {
+		if r == '?' {
+			*n++
+			b.WriteString(fmt.Sprintf("$%d", *n))
+		} else {
+			b.WriteRune(r)
+		}
+	}
+
+	return b.String()
 }
 
 func padBytes(b []byte, length int) []byte {
