@@ -107,7 +107,7 @@ func (s *Server) QueryLogs(ctx context.Context, req *pb.QueryLogsRequest) (*pb.Q
 func (s *Server) QueryMetrics(ctx context.Context, req *pb.QueryMetricsRequest) (*pb.QueryMetricsResponse, error) {
 	log.Printf("[metrics] received query metrics request: %s", req.Query)
 
-	var whereClause string
+	var combinedWhereClause strings.Builder
 	var queryArgs []any
 
 	if req.Query != "" {
@@ -117,28 +117,34 @@ func (s *Server) QueryMetrics(ctx context.Context, req *pb.QueryMetricsRequest) 
 			return nil, fmt.Errorf("invalid query syntax: %w", err)
 		}
 
-		baseClause, baseArgs, err := queryparser.BuildSQL(ast)
+		userClause, userArgs, err := queryparser.BuildSQL(ast)
 		if err != nil {
 			return nil, fmt.Errorf("invalid query: %w", err)
 		}
 
-		n := 0
-		whereClause = "WHERE " + rebind(baseClause, &n)
-		queryArgs = baseArgs
+		combinedWhereClause.WriteString(userClause)
+		queryArgs = append(queryArgs, userArgs...)
 	}
 
-	timeClause := "timestamp >= $1 AND timestamp <= $2"
-	if whereClause != "" {
-		timeClause = "timstamp >= $3 AND timestamp <= $4"
-		queryArgs = append(queryArgs, time.Unix(0, req.StartTimeUnixNano), time.Unix(0, req.EndTimeUnixNano))
-	} else {
-		whereClause = "WHERE " + timeClause
-		queryArgs = []any{time.Unix(0, req.StartTimeUnixNano), time.Unix(0, req.EndTimeUnixNano)}
+	if combinedWhereClause.Len() > 0 {
+		combinedWhereClause.WriteString(" AND ")
 	}
+
+	combinedWhereClause.WriteString("timestamp >= ? AND timestamp <= ?")
+
+	queryArgs = append(queryArgs, time.Unix(0, req.StartTimeUnixNano), time.Unix(0, req.EndTimeUnixNano))
+
+	finalSQLClause := combinedWhereClause.String()
+	if finalSQLClause == "" {
+		finalSQLClause = "1=1"
+	}
+
+	pgxIndex := 0
+	reboundClause := rebind(finalSQLClause, &pgxIndex)
 
 	finalQuery := fmt.Sprintf(
-		"SELECT timestamp, name, value, attributes FROM metrics %s ORDER BY timestamp DESC LIMIT 100",
-		whereClause,
+		"SELECT timestamp, name, value, attributes FROM metrics WHERE %s ORDER BY timestamp DESC LIMIT 100",
+		reboundClause,
 	)
 
 	log.Printf("executing sql: %s", finalQuery)
